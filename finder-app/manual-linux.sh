@@ -119,5 +119,5 @@ cd ..
 gzip -f initramfs.cpio
 
 cd "$OUTDIR"
-
+cp ${OUTDIR}/linux-stable/arch/arm64/boot/Image .
 # mkimage -A arm64 -O linux -T ramdisk -C gzip -d initramfs.cpio.gz initramfs
