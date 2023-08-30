@@ -61,6 +61,11 @@ int main(int argc, char *argv[]) {
     perror("Error when binding socket");
     return -1;
   }
+  struct sigaction sigint;
+  memset(&sigint, 0, sizeof(struct sigaction));
+  sigint.sa_handler = handler;
+  sigaction(SIGINT, &sigint, NULL);
+  sigaction(SIGTERM, &sigint, NULL);
 
   for (;;) {
 
@@ -140,4 +145,8 @@ int main(int argc, char *argv[]) {
   return 0;
 }
 
-void handler(int SIG) {}
+void handler(int SIG) {
+  close(server_socket);
+  remove(FILE_PATH);
+  exit(0);
+}
