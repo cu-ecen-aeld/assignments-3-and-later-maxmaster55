@@ -1,0 +1,21 @@
+#!/bin/bash
+
+case "$1" in
+start)
+	echo "Starting simple server"
+	start-stop-daemon -S -n simpleserver -a /usr/bin/simpleserver
+
+	;;
+stop)
+	echo "Stopping simple server"
+	start-stop-daemon -K -n simpleserver
+
+	;;
+
+*)
+	echo "wtf\n"
+	exit 1
+	;;
+esac
+
+exit 0
