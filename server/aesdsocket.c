@@ -1,7 +1,10 @@
 #include <arpa/inet.h>
+#include <bits/pthreadtypes.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,6 +16,8 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "./queue.h"
+
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define BUFF_SIZE 1024
 #define MAX_CONNECTED 10
@@ -22,6 +27,23 @@ int is_daemon = false;
 int server_socket;
 
 void handler(int SIG);
+void *thread_task(void *arg);
+
+// thread stuff
+
+pthread_mutex_t mutex;
+
+typedef struct {
+  FILE *write_file;
+  int connfd;
+  bool is_finished;
+} thread_data_t;
+
+struct node {
+  pthread_t thread;
+  thread_data_t *data;
+  SLIST_ENTRY(node) nodes;
+};
 
 int main(int argc, char *argv[]) {
   if (argc == 2) {
@@ -33,6 +55,8 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+
+  pthread_mutex_init(&mutex, NULL);
 
   // start socket
   char buf[BUFF_SIZE];
@@ -67,14 +91,19 @@ int main(int argc, char *argv[]) {
   sigaction(SIGINT, &sigint, NULL);
   sigaction(SIGTERM, &sigint, NULL);
 
+  // init the queue
+  SLIST_HEAD(slist, node) head;
+  SLIST_INIT(&head);
+
   for (;;) {
 
-    if ((listen(server_socket, 5)) != 0) {
+    if ((listen(server_socket, 500)) != 0) {
       perror("Listen failed");
       return -1;
     }
     len = sizeof(cli_in);
 
+    // accept the connection
     connfd = accept(server_socket, (struct sockaddr *)&cli_in, &len);
     if (connfd < 0) {
       perror("server accept failed");
@@ -92,57 +121,82 @@ int main(int argc, char *argv[]) {
       return -1;
     }
 
-    for (;;) {
-      memset(buf, 0, BUFF_SIZE);
+    // create the thread
 
-      int ret;
-      ret = recv(connfd, &buf, BUFF_SIZE, 0);
-      if (ret < 0) {
-        perror("Error when reading socket data");
-        return -1;
+    struct node *element = element = malloc(sizeof(struct node));
+    if (element == NULL) {
+      perror("Error creating element");
+      return 1;
+    }
+    thread_data_t data = {
+        .is_finished = false, .connfd = connfd, .write_file = fi};
+    element->data = &data;
+    pthread_create(&(element->thread), NULL, thread_task, &data);
+    SLIST_INSERT_HEAD(&head, element, nodes);
+
+    SLIST_FOREACH(element, &head, nodes) {
+      if (element->data->is_finished) {
+        pthread_join(element->thread, NULL);
       }
-
-      fwrite(buf, 1, ret, fi);
-
-      if (buf[ret - 1] == '\n') {
-        break;
-      }
-    }
-
-    fseek(fi, 0, SEEK_END);
-    size_t fsize = ftell(fi);
-    if (fseek(fi, 0, SEEK_SET) == -1) {
-      perror("Failed to set fd to beginning of file");
-      return -1;
-    }
-    memset(buf, 0, BUFF_SIZE);
-
-    char *fbuf[fsize];
-    memset(fbuf, 0, fsize);
-    int ret = fread(fbuf, 1, fsize, fi);
-
-    if (ret < 0) {
-      perror("Failed reading file to send back to client");
-      return -1;
-    } else {
-      send(connfd, fbuf, fsize, 0);
-      memset(buf, 0, BUFF_SIZE);
-      memset(fbuf, 0, fsize);
-    }
-
-    fflush(fi);
-    if (fclose(fi) < 0) {
-      perror("Error when closing file");
-      return -1;
-    }
-
-    if (close(connfd) < 0) {
-      perror("Error when closing connection");
-      return -1;
-    }
+    };
   }
 
   return 0;
+}
+
+void *thread_task(void *arg) {
+  thread_data_t *data = (thread_data_t *)arg;
+
+  char buf[BUFF_SIZE];
+
+  for (;;) {
+    memset(buf, 0, BUFF_SIZE);
+
+    int ret;
+    ret = recv(data->connfd, &buf, BUFF_SIZE, 0);
+    if (ret < 0) {
+      perror("Error when reading socket data");
+      exit(1);
+    }
+
+    // write to file
+    pthread_mutex_lock(&mutex);
+    fwrite(buf, 1, ret, data->write_file);
+    pthread_mutex_unlock(&mutex);
+    if (buf[ret - 1] == '\n') {
+      break;
+    }
+  }
+
+  fseek(data->write_file, 0, SEEK_END);
+  size_t fsize = ftell(data->write_file);
+  if (fseek(data->write_file, 0, SEEK_SET) == -1) {
+    perror("Failed to set fd to beginning of file");
+    exit(1);
+  }
+  memset(buf, 0, BUFF_SIZE);
+
+  char *fbuf[fsize];
+  memset(fbuf, 0, fsize);
+  int ret = fread(fbuf, 1, fsize, data->write_file);
+
+  if (ret < 0) {
+    perror("Failed reading file to send back to client");
+    exit(1);
+  } else {
+    send(data->connfd, fbuf, fsize, 0);
+    memset(buf, 0, BUFF_SIZE);
+    memset(fbuf, 0, fsize);
+  }
+
+  fflush(data->write_file);
+
+  if (close(data->connfd) < 0) {
+    perror("Error when closing connection");
+    exit(1);
+  }
+
+  data->is_finished = true;
 }
 
 void handler(int SIG) {
